@@ -27,10 +27,10 @@ _Disclaimer: This is not an officially supported Google product._
 
 In the generation steps, the user has full control, but can also rely on the tool's recommendations.
 
-[Technical Requirements](#requirements) •
+[Technical Requirements](#technical-requirements) •
 [Deployment](#deployment) •
 [Using Scene Machine](#using-scene-machine) •
-[Alternatives](#alternatives) •
+[Alternatives](#alternatives-to-scene-machine) •
 [Developers' Guide](DEVELOPING.md)
 
 ## Technical Requirements
@@ -41,6 +41,28 @@ To deploy this application, you need a **project on Google Cloud Platform withou
 - The actual processing is performed by **Remix Engine**, a modular Python application on Cloud Run. See the [Developers' Guide](DEVELOPING.md) for details.
 
 Scene Machine sends workflow definitions to Remix Engine, which orchestrates its functional modules (e.g. turning images into videos) and reports back on results.
+
+### Google Cloud APIs Used
+
+The following APIs are used by Scene Machine:
+
+- Agent Platform API ( aiplatform.googleapis.com ): Used for accessing Gemini and Veo models for text, image, and video generation.
+- API Gateway API ( apigateway.googleapis.com ): Used to create and manage the API Gateway that routes traffic to the backend.
+- Artifact Registry API ( artifactregistry.googleapis.com ): Used to store the Docker container images for the backend service.
+- Cloud Build API ( cloudbuild.googleapis.com ): Used to build the container images for Cloud Run.
+- Cloud Tasks API ( cloudtasks.googleapis.com ): Used for managing task queues for asynchronous processing (e.g., video generation).
+- Cloud Firestore API ( firestore.googleapis.com ): Used for the database storing application state and configurations.
+- Cloud Run API ( run.googleapis.com ): Used to host and run the backend service.
+- Service Control API ( servicecontrol.googleapis.com ): Required by API Gateway for managed services.
+- Identity-Aware Proxy (IAP) API ( iap.googleapis.com ): Used to secure the application and manage access.
+- Firebase API ( firebase.googleapis.com ): Used for Firebase integration, project management, and rules deployment.
+- Identity Toolkit API ( identitytoolkit.googleapis.com ): Used for Firebase Authentication and managing user domains.
+- App Engine Admin API ( appengine.googleapis.com ): The UI is deployed to App Engine (see  deploy-ui.sh  line 179).
+- API Keys API ( apikeys.googleapis.com ): Used to create and manage API keys for the API Gateway (see  deploy.sh  line 229).
+- Cloud Storage API ( storage.googleapis.com ): Used for storing assets, examples, and generated content.
+- Cloud Logging API ( logging.googleapis.com ): Used for application logging (referenced in  requirements.in ).
+
+_Please note that most of the APIs are enabled automatically when you run the deployment script. Cloud Storage and Cloud Logging are normally enabled by default. If your organization disables these APIs, you will need to enable them manually._
 
 ## Deployment
 
@@ -107,17 +129,17 @@ Scene Machine sends workflow definitions to Remix Engine, which orchestrates its
     - _Note: The script outputs estimates regarding run times._
     - _Note: You might be prompted to run the UI deployment script immediately at the end._
 
-    > [!TIP]
-    > **Troubleshooting Firebase deployment failures:**
-    > If `./deploy.sh` fails at the Firebase step with an error like `Error: Project not found`, it usually means the Firebase CLI cannot access the project or terms have not been accepted.
-    >
-    > **How to fix it:**
-    >
-    > 1. **Check Login:** Ensure you are logged in by running `firebase login` in your terminal.
-    > 2. **Manual Fallback (Accept Terms):** If still failing, go to the [Firebase Console](https://console.firebase.google.com/).
-    > 3. Click **Add Project** and select your existing Google Cloud project from the dropdown list.
-    > 4. Follow the prompts to add Firebase resources. This process will guide you through accepting the necessary terms of service.
-    > 5. Once completed in the console, return to your terminal and re-run `./deploy.sh`.
+> [!TIP]
+> **Troubleshooting Firebase deployment failures:**
+> If `./deploy.sh` fails at the Firebase step with an error like `Error: Project not found`, it usually means the Firebase CLI cannot access the project or terms have not been accepted.
+>
+> **How to fix it:**
+>
+> 1. **Check Login:** Ensure you are logged in by running `firebase login` in your terminal.
+> 2. **Manual Fallback (Accept Terms):** If still failing, go to the [Firebase Console](https://console.firebase.google.com/).
+> 3. Click **Add Project** and select your existing Google Cloud project from the dropdown list.
+> 4. Follow the prompts to add Firebase resources. This process will guide you through accepting the necessary terms of service.
+> 5. Once completed in the console, return to your terminal and re-run `./deploy.sh`.
 
 4.  **Set up OAuth consent screen:**
     - In your Google Cloud console, go to **API & Services > Credentials > OAuth consent screen**.
