@@ -96,6 +96,8 @@ def _crop_image(
 
 def _image_to_bytes(img: PIL.Image.Image, image_format: str = 'PNG') -> bytes:
   """Converts a PIL Image to bytes."""
+  if img.mode not in ('RGB', 'L'):
+    img = img.convert('RGB')
   with io.BytesIO() as output_stream:
     img.save(output_stream, format=image_format)
     return output_stream.getvalue()
@@ -113,13 +115,16 @@ def execute(
 
   Args:
     gcs: The GCS object to use when accessing files.
-    workflow_params: the parameters common to all nodes in the workflow. The
-      required parameters are gcp_project and gcp_location, which are,
-      respectively, the project to use when querying gemini and the gcp_location
-      to use.
-    image: the relative path of the image to outpaint.
-    target_ratio: the aspect ratio of the finished image in the format
-      width:height (e.g. 9:16)
+    workflow_params: The parameters common to all nodes in the workflow.
+      The required parameters are gcp_project and gcp_location, which are,
+      respectively, the project to use when querying gemini and the
+      gcp_location to use.
+    image: The relative path of the image to outpaint.
+    target_ratio: The aspect ratio of the finished image in the format
+      width:height (e.g. 9:16).
+    outpainter_model: The model to use for outpainting.
+    outpainter_model_location: The location of the model to use for
+      outpainting.
 
 
   Returns:
