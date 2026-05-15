@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 -->
+
 <a id="readme-top"></a>
 _Disclaimer: This is not an officially supported Google product._
 
@@ -21,6 +22,7 @@ _Disclaimer: This is not an officially supported Google product._
 Scene Machine is a Google Cloud-based, open-source workbench that leverages generative AI models to facilitate storyboard-driven video ad creation. While its primary use case is transforming product or service images (such as in retail, food delivery, or travel) into video ads, it also serves as a robust video prototyping platform for rapidly sharing and iterating on ideas.
 
 ## TL;DR
+
 - **Production Speed:** Automates and parallelizes scene generation, reducing a lengthy asset workflow to minutes.
 - **Target Audience:** Advertisers, developers, and creative teams seeking a video generation workbench built natively on Google Cloud.
 - **Key Technology:** Harnesses [Gemini](https://deepmind.google/models/gemini/) for intelligent prompt design and the [Veo model](https://deepmind.google/models/veo/) for high-fidelity, parallel image-to-video generation. The entire workflow is orchestrated through a single intuitive web interface.
@@ -48,15 +50,19 @@ Scene Machine is a Google Cloud-based, open-source workbench that leverages gene
 Scene Machine guides users through four core stages to turn a set of static images into a video asset.
 
 ### 1. Setup (Storyboard Generation)
+
 Upload images and business context (such as target audience and brand guidelines) to have Gemini automatically generate a structured, prompt-driven storyboard. Users can optionally apply predefined Creative Templates to guide scene structure, or start with an empty storyboard to build the timeline manually.
 
 ### 2. Storyboard (Video Generation & Scene-by-Scene Iteration)
+
 The backend sends parallel video generation requests to Google's Veo model, significantly reducing the total time required. Users refine the ad by iterating on prompts and candidate variations scene-by-scene. The timeline can be expanded at any point by generating new scenes (via text-to-video or image-to-video) or by uploading existing video slates. This process is entirely non-destructive, allowing users to adjust, trim, and reorder assets without losing previously generated video scenes.
 
 ### 3. Composition (Transitions, Audio, and Brand Overlays)
+
 Once scenes are finalized, users can enhance their ad in the Composition stage by adding transitions between scenes, custom background audio tracks (music or voice-overs), and precise pixel-positioned image overlays (such as brand logos).
 
 ### 4. Output (Rendering & Export)
+
 Users compile all timeline assets by rendering the video, which is then available for review or direct MP4 download. Crucially, the history panel preserves all older rendered versions, enabling users to maintain and compare multiple creative variants (e.g., short vs. long versions) within the same project.
 
 ## Technical Requirements
@@ -78,6 +84,7 @@ The following APIs are used by Scene Machine:
 - API Gateway API ( apigateway.googleapis.com ): Used to create and manage the API Gateway that routes traffic to the backend.
 - Artifact Registry API ( artifactregistry.googleapis.com ): Used to store the Docker container images for the backend service.
 - Cloud Build API ( cloudbuild.googleapis.com ): Used to build the container images for Cloud Run.
+- Compute Engine API ( compute.googleapis.com ): Enabled to guarantee the default Compute Engine service account exists (used for IAM role bindings during deploy).
 - Cloud Tasks API ( cloudtasks.googleapis.com ): Used for managing task queues for asynchronous processing (e.g., video generation).
 - Cloud Firestore API ( firestore.googleapis.com ): Used for the database storing application state and configurations.
 - Cloud Run API ( run.googleapis.com ): Used to host and run the backend service.
@@ -85,12 +92,29 @@ The following APIs are used by Scene Machine:
 - Identity-Aware Proxy (IAP) API ( iap.googleapis.com ): Used to secure the application and manage access.
 - Firebase API ( firebase.googleapis.com ): Used for Firebase integration, project management, and rules deployment.
 - Identity Toolkit API ( identitytoolkit.googleapis.com ): Used for Firebase Authentication and managing user domains.
-- App Engine Admin API ( appengine.googleapis.com ): The UI is deployed to App Engine (see  deploy-ui.sh  line 179).
-- API Keys API ( apikeys.googleapis.com ): Used to create and manage API keys for the API Gateway (see  deploy.sh  line 229).
+- App Engine Admin API ( appengine.googleapis.com ): The UI is deployed to App Engine (see deploy-ui.sh line 179).
+- API Keys API ( apikeys.googleapis.com ): Used to create and manage API keys for the API Gateway (see deploy.sh line 229).
 - Cloud Storage API ( storage.googleapis.com ): Used for storing assets, examples, and generated content.
-- Cloud Logging API ( logging.googleapis.com ): Used for application logging (referenced in  requirements.in ).
+- Cloud Logging API ( logging.googleapis.com ): Used for application logging (referenced in requirements.in ).
 
 _Please note that most of the APIs are enabled automatically when you run the deployment script. Cloud Storage and Cloud Logging are normally enabled by default. If your organization disables these APIs, you will need to enable them manually._
+
+### Permissions required for the deploying user
+
+`roles/owner` on the target project is sufficient and is the simplest option.
+
+If your organization's policies require narrower scopes, `roles/editor` covers most of the deploy work. The following additional roles are not included in `editor`, but are required to deploy Scene Machine:
+
+| Role                                    | Why it's needed                                                           |
+| --------------------------------------- | ------------------------------------------------------------------------- |
+| `roles/datastore.owner`                 | Firestore native-mode database creation                                   |
+| `roles/appengine.appCreator`            | One-time `gcloud app create` at the project level                         |
+| `roles/appengine.appAdmin`              | Deploying the UI (`deploy-ui.sh`) to the existing App Engine app          |
+| `roles/resourcemanager.projectIamAdmin` | Project-level IAM bindings — the `add_iam_binding` calls in `deploy.sh`   |
+| `roles/iam.roleAdmin`                   | Create the custom `SceneMachineUser` role late in `deploy.sh`             |
+| `roles/iam.serviceAccountAdmin`         | Service-account-level IAM bindings (e.g. Cloud Tasks → Cloud Run "actAs") |
+
+End users of the deployed app only need the custom `projects/$PROJECT/roles/SceneMachineUser` role — see [Adding Users](#adding-users).
 
 ## Deployment
 
@@ -145,7 +169,7 @@ _Please note that most of the APIs are enabled automatically when you run the de
     | `API_GATEWAY`          | API Gateway ID for the application endpoint.               | Defaults to `scenemachine-api-gateway`.              |
     | `TASKS_QUEUE_PREFIX`   | Prefix for Cloud Task queue names.                         | Max lengths apply. Support letters, hyphen, numbers. |
     | `BACKEND_SERVICE_NAME` | Service name for the application backend on GCP.           | Defaults to `remix-engine-backend`.                  |
-    | `CUSTOM_DOMAIN`        | Custom domain for the application user interface.          | Optional. e.g., `scene-machine.my-company.com`   |
+    | `CUSTOM_DOMAIN`        | Custom domain for the application user interface.          | Optional. e.g., `scene-machine.my-company.com`       |
     - **Important Notes for Configuration:**
       - **Naming:** Use alphanumerical names (with hyphens) for entities like databases.
       - **Storage:** If using an existing bucket, it must use a non-hierarchical namespace.
@@ -182,20 +206,25 @@ _Please note that most of the APIs are enabled automatically when you run the de
     - Go to the [Firebase console](https://console.firebase.google.com/), select your project then click **Authentication > Sign-in method**.
     - Click **Add new provider**, choose **Google** then enable and save it.
 
-6.  **Link Storage Bucket to Firebase**
-    - Go to the [Firebase console](https://console.firebase.google.com/).
-    - Select your project from the list.
-    - Hover over **Databases & Storage** on the left menu and select **Storage**.
-    - Click **Get started** (if prompted) and ensure the location selected is the same as you selected for the project.
-      - _Note: No-cost locations are only available in the USA._
-    - If asked, start in production mode to ensure the data in firebase is kept private.
-    - Click on the bucket name dropdown and select **+ Add bucket** (if not automatically prompted).
-    - Select **Import existing Google Cloud Storage buckets**.
-    - Select your project bucket and confirm.
+6.  **Link Storage Bucket to Firebase** — _two sequential actions_ are required on the same Firebase Storage page.
+    - Open the [Firebase console](https://console.firebase.google.com/) → select your project → **Databases & Storage** → **Storage**.
+
+    **(a) Initialize Firebase Storage** (one-time per project):
+    - Click **Get started** and walk through the wizard. This creates the project's _default_ `<project>.firebasestorage.app` bucket, which the Firebase CLI requires; without it the storage deploy fails with `Firebase Storage has not been set up on project`.
+    - Production mode is fine.
+    - _Note: No-cost locations are only available in the USA._
+
+    **(b) Register your project bucket with Firebase Storage:**
+    - After (a) finishes the bucket dropdown appears at the top of the page (it doesn't exist until a bucket exists).
+    - Click the dropdown → **+ Add bucket** → **Import existing Google Cloud Storage buckets**.
+    - Select your project bucket (the one referenced by `GCS_BUCKET` in `config.txt`) → confirm.
 
 7.  **Deploy UI**
     - Run `./deploy-ui.sh` (if you skipped it during backend deployment).
     - If requested, perform any required manual steps indicated by the script (e.g. linking buckets or configuring OAuth).
+
+> [!TIP]
+> Steps 4–6 can be completed **in parallel** with `./deploy-ui.sh` running. The script polls every 15s (or prompts you for the OAuth consent screen) and continues automatically once each manual action is done. After `./deploy.sh` finishes you can launch `./deploy-ui.sh` immediately and complete steps 4–6 in browser tabs while it waits.
 
 8.  **Set up Identity-Aware Proxy**:
     - In the [App Engine settings](https://console.cloud.google.com/appengine/settings?serviceId=default), under "Identity-Aware Proxy" select "Configure Now".
@@ -211,7 +240,15 @@ To help debug problems with the deployment scripts, you can change their top lin
 
 [< Deployment](#deployment) • [Top](#readme-top) • [Using Scene Machine >](#using-scene-machine)
 
-Each person intending to use Scene Machine needs to be given the "Scene Machine User" role in the Google Cloud project in which the tool is deployed.
+Each person intending to use Scene Machine needs to be given the "Scene Machine User" role in the Google Cloud project in which the tool is deployed. `./deploy-ui.sh`'s final summary outputs a ready-to-paste `gcloud` command for this; you can also run it directly:
+
+```bash
+gcloud projects add-iam-policy-binding $PROJECT \
+  --member="user:USER_EMAIL@example.com" \
+  --role="projects/$PROJECT/roles/SceneMachineUser"
+```
+
+Or grant it via the [IAM console](https://console.cloud.google.com/iam-admin/iam) → **+ Grant Access** → enter user email → role: **Scene Machine User** (under "Custom") → Save.
 
 ## Using Scene Machine
 
