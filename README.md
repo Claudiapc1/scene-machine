@@ -157,20 +157,34 @@ manually.*
 
 `roles/owner` on the target project is sufficient and is the simplest option.
 
-If your organization's policies require narrower scopes, `roles/editor` covers
-most of the deploy work. The following additional roles are not included in
-`editor`, but are required to deploy Scene Machine:
+If your organization's policies require narrower scopes, the following roles are
+the minimum required to deploy Scene Machine:
 
-Role                                    | Why it's needed
---------------------------------------- | ---------------
-`roles/datastore.owner`                 | Firestore native-mode database creation
-`roles/appengine.appCreator`            | One-time `gcloud app create` at the project level
-`roles/appengine.appAdmin`              | Deploying the UI to the existing App Engine app
-`roles/resourcemanager.projectIamAdmin` | Project-level IAM bindings — the `add_iam_binding` calls in `deploy.sh`
-`roles/iam.roleAdmin`                   | Create the custom `SceneMachineUser` role late in `deploy.sh`
-`roles/iam.serviceAccountAdmin`         | Service-account-level IAM bindings (e.g. Cloud Tasks → Cloud Run "actAs")
+Role | Why it's needed
+--- | ---
+| `roles/apigateway.admin` | API Gateway |
+| `roles/appengine.appAdmin` | `gcloud app deploy` |
+| `roles/appengine.appCreator` | `gcloud app create` |
+| `roles/artifactregistry.admin` | Artifact Registry repo + images |
+| `roles/compute.viewer` | View the services and setttings in the project |
+| `roles/cloudbuild.builds.editor`  | Cloud Build, triggered by `gcloud run deploy --source` (deploy.sh) |
+| `roles/cloudtasks.admin` | Cloud Tasks queues |
+| `roles/datastore.admin` | Firestore **database** creation |
+| `roles/firebase.admin` | Firebase project/app/rules/storage link |
+| `roles/iam.roleAdmin` | Create the custom `SceneMachineUser` role |
+| `roles/iam.serviceAccountAdmin` | Service-account IAM bindings |
+| `roles/iam.serviceAccountUser` | `actAs` during Run/App Engine deploy |
+| `roles/iap.admin` | Configure IAP users |
+| `roles/iap.settingsAdmin | Setup & configure IAP |
+| `roles/oauthconfig.editor | Configuring the OAuth consent screen |
+| `roles/resourcemanager.projectIamAdmin` | Project-level IAM bindings |
+| `roles/run.admin` | Cloud Run services |
+| `roles/servicemanagement.admin` | Create and deploy the API Gateway |
+| `roles/serviceusage.apiKeysAdmin` | Create the API key |
+| `roles/serviceusage.serviceUsageAdmin` | Enable APIs |
+| `roles/storage.admin` | GCS buckets + objects |
 
-End users of the deployed app only need the custom
+All users of the deployed app (including the deployer) require the custom
 `projects/$PROJECT/roles/SceneMachineUser` role — see
 [Adding Users](#adding-users).
 
