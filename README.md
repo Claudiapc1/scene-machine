@@ -98,14 +98,14 @@ project.
 [< How it Works](#how-it-works) • [Top](#readme-top) •
 [Deployment >](#deployment)
 
-To deploy this application, you need a **project on Google Cloud Platform
-without any existing App Engine apps**.
+To deploy this application, you need a **project on Google Cloud Platform with
+billing enabled**.
 
--   Scene Machine's user interface is implemented as an Angular/TypeScript
-    application running on App Engine.
+-   Scene Machine's user interface is an Angular/TypeScript application served,
+    together with the `/api` control plane, from the `app` Cloud Run service.
 -   The actual processing is performed by **Remix Engine**, a modular Python
-    application on Cloud Run. See the [Developers' Guide](DEVELOPING.md) for
-    details.
+    application running on a private `worker` Cloud Run service. See the
+    [Developers' Guide](DEVELOPING.md) for details.
 
 Scene Machine sends workflow definitions to Remix Engine, which orchestrates its
 functional modules (e.g. turning images into videos) and reports back on
@@ -117,8 +117,6 @@ The following APIs are used by Scene Machine:
 
 -   Agent Platform API ( aiplatform.googleapis.com ): Used for accessing Gemini
     and Veo models for text, image, and video generation.
--   API Gateway API ( apigateway.googleapis.com ): Used to create and manage the
-    API Gateway that routes traffic to the backend.
 -   Artifact Registry API ( artifactregistry.googleapis.com ): Used to store the
     Docker container images for the backend service.
 -   Cloud Build API ( cloudbuild.googleapis.com ): Used to build the container
@@ -132,17 +130,8 @@ The following APIs are used by Scene Machine:
     storing application state and configurations.
 -   Cloud Run API ( run.googleapis.com ): Used to host and run the backend
     service.
--   Service Control API ( servicecontrol.googleapis.com ): Required by API
-    Gateway for managed services.
 -   Identity-Aware Proxy (IAP) API ( iap.googleapis.com ): Used to secure the
     application and manage access.
--   Firebase API ( firebase.googleapis.com ): Used for Firebase integration,
-    project management, and rules deployment.
--   Identity Toolkit API ( identitytoolkit.googleapis.com ): Used for Firebase
-    Authentication and managing user domains.
--   App Engine Admin API ( appengine.googleapis.com ): The UI is deployed to App Engine.
--   API Keys API ( apikeys.googleapis.com ): Used to create and manage API keys
-    for the API Gateway (see deploy.sh line 229).
 -   Cloud Storage API ( storage.googleapis.com ): Used for storing assets,
     examples, and generated content.
 -   Cloud Logging API ( logging.googleapis.com ): Used for application logging
@@ -157,48 +146,95 @@ manually.*
 
 `roles/owner` on the target project is sufficient and is the simplest option.
 
-If your organization's policies require narrower scopes, the following roles are
-the minimum required to deploy Scene Machine:
+If your organization forbids broad roles like `roles/editor`, the following is
+the minimum set of roles required to deploy Scene Machine. Each one maps to
+something the deploy actually does, so a narrowly-scoped deployer can be granted
+exactly these instead of `editor` or `owner`:
 
 Role | Why it's needed
 --- | ---
-| `roles/apigateway.admin` | API Gateway |
-| `roles/appengine.appAdmin` | `gcloud app deploy` |
-| `roles/appengine.appCreator` | `gcloud app create` |
-| `roles/artifactregistry.admin` | Artifact Registry repo + images |
-| `roles/compute.viewer` | View the services and setttings in the project |
-| `roles/cloudbuild.builds.editor`  | Cloud Build, triggered by `gcloud run deploy --source` (deploy.sh) |
-| `roles/cloudtasks.admin` | Cloud Tasks queues |
-| `roles/datastore.admin` | Firestore **database** creation |
-| `roles/firebase.admin` | Firebase project/app/rules/storage link |
-| `roles/iam.roleAdmin` | Create the custom `SceneMachineUser` role |
-| `roles/iam.serviceAccountAdmin` | Service-account IAM bindings |
-| `roles/iam.serviceAccountUser` | `actAs` during Run/App Engine deploy |
-| `roles/iap.admin` | Configure IAP users |
-| `roles/iap.settingsAdmin | Setup & configure IAP |
-| `roles/oauthconfig.editor | Configuring the OAuth consent screen |
-| `roles/resourcemanager.projectIamAdmin` | Project-level IAM bindings |
-| `roles/run.admin` | Cloud Run services |
-| `roles/servicemanagement.admin` | Create and deploy the API Gateway |
-| `roles/serviceusage.apiKeysAdmin` | Create the API key |
-| `roles/serviceusage.serviceUsageAdmin` | Enable APIs |
-| `roles/storage.admin` | GCS buckets + objects |
+`roles/serviceusage.serviceUsageAdmin` | Enable the required Google Cloud APIs
+`roles/datastore.admin` | Firestore native-mode database creation (`databases.create`)
+`roles/artifactregistry.admin` | Create the Artifact Registry repo and push the container image
+`roles/cloudbuild.builds.editor` | Build the image (Cloud Build runs `gcloud run deploy --source`)
+`roles/run.admin` | Create and configure the `app` and `worker` Cloud Run services
+`roles/cloudtasks.admin` | Create and manage the worker task queue
+`roles/storage.admin` | Create the GCS buckets and set their CORS
+`roles/iam.roleAdmin` | Create the custom `SceneMachineUser` role
+`roles/iam.serviceAccountAdmin` | Service-account-level IAM bindings (e.g. Cloud Tasks to Cloud Run "actAs")
+`roles/iam.serviceAccountUser` | actAs the runtime service account during the Cloud Run deploy
+`roles/resourcemanager.projectIamAdmin` | Project-level IAM bindings (the `add_iam_binding` calls in `deploy.sh`)
+`roles/oauthconfig.editor` | Configure the OAuth consent screen
+`roles/compute.viewer` | View the project's services and settings
 
-All users of the deployed app (including the deployer) require the custom
-`projects/$PROJECT/roles/SceneMachineUser` role — see
-[Adding Users](#adding-users).
+The single-image front-door deployment no longer uses App Engine or API
+Gateway, so the legacy `roles/appengine.*`, `roles/apigateway.*`, and API-key
+roles are **not** required.
+
+The deploy also needs `roles/iap.admin` and `roles/iap.settingsAdmin` to enable
+and configure IAP (Identity-Aware Proxy) on the `app` Cloud Run service, which is
+how the deployed app gates access.
+
+Some organizations forbid granting an **external** account `roles/owner`
+outright (`ORG_MUST_INVITE_EXTERNAL_OWNERS`); in that case grant the roles in
+this table individually instead of `owner`.
+
+Every user (including you, the deployer) needs the custom
+`projects/$PROJECT/roles/SceneMachineUser` role on the `app` service to get in.
+See [Adding Users](#adding-users).
 
 ## Deployment
 
 [< Technical Requirements](#technical-requirements) • [Top](#readme-top) •
 [Adding Users >](#adding-users)
 
+#### How access works
+
+The deployed app is gated by Google's **Identity-Aware Proxy (IAP)**. IAP sits
+in front of the `app` Cloud Run service: a person signs in at Google's front
+door and is only let through if you have granted them access, so no
+unauthenticated request ever reaches the service (the service itself stays
+private). You grant someone access by giving them the `SceneMachineUser` role
+through IAP — see [Adding Users](#adding-users). `deploy.sh` deploys in IAP mode;
+it is the only deployable sign-in mode (there is no public mode).
+
+There is one setup difference depending on your project:
+
+-   **Project in a Google Workspace / Cloud Identity organization** (recommended
+    for teams; required for corporate `google.com`-style projects) → IAP uses
+    Google's **managed** OAuth client automatically (no client to create) and the
+    consent screen can be **Internal**. This is the smoothest path, and it is the
+    only option on organizations that enforce Domain Restricted Sharing (a common
+    policy that forbids public services) — which IAP satisfies, since the service
+    stays private.
+-   **Personal project with no organization** (a plain gmail-owned project) → IAP
+    still works, but you must **also create a custom OAuth client** once in the
+    console (IAP → select the `app` service → Custom OAuth → *Auto-generate
+    credentials*) and configure the OAuth consent screen. `deploy.sh` prints these
+    one-time steps at the end. Without the custom client, sign-in fails with a
+    `502 "Empty OAuth client"`.
+
+> **Just want to develop, not deploy?** There is a local mode that runs the UI
+> and backend on your own machine with **no sign-in** at all, for fast
+> iteration — you do not need to deploy to work on Scene Machine. See
+> [Local Development](DEVELOPING.md) in the Developers' Guide.
+
+Access is enforced at the application's front door, not the data layer: all
+Cloud Storage and Firestore work is performed by the app's own service account,
+so end users never need direct storage/database permissions.
+
+> [!IMPORTANT]
+> **Projects and generated media are shared across everyone who is admitted.**
+> Scene Machine is built for a trusted team: any admitted user can see, open,
+> edit, and delete every project, and can view any generated media in the app's
+> storage bucket. There is no per-user or per-group ownership. Admit only people
+> you are comfortable sharing all projects with, and run separate deployments
+> for groups whose data should stay separate.
+
 #### Prerequisites
 
 -   **Google Cloud Project**: A project on Google Cloud Platform **with billing
-    enabled** and ideally without any existing App Engine apps. *(Note: If an
-    App Engine app already exists, deployment will proceed but will overwrite
-    the `default` service, and you will not be able to change the region.)*
+    enabled**.
 -   **Permissions**: We recommend having the **Project Owner** role on the
     Google Cloud project to conduct the deployment successfully.
 -   **Node.js**: Ensure you have [Node.js](https://nodejs.org/en/download)
@@ -207,12 +243,28 @@ All users of the deployed app (including the deployer) require the custom
 -   **Google Cloud SDK (gcloud)**: Ensure you have the
     [Google Cloud CLI](https://cloud.google.com/sdk/docs/install) installed and
     initialized.
--   **Firebase Tools**: Install with `npm i -g firebase-tools`.
--   **Firebase Login**: Run `firebase login` to authenticate before beginning
-    deployment.
 -   **envsubst**: Ensure you have `envsubst` installed (typically via the
     `gettext` package, e.g., `sudo apt-get install gettext` on Debian/Ubuntu,
     `brew install gettext` on macOS).
+
+#### Sign in first (two separate logins)
+
+The deploy uses **two independent credentials** that sign in — and expire —
+separately. `deploy.sh` checks both before it does any work and stops with the
+exact command to run if one is missing, but it is simplest to refresh both up
+front. Run them in this order, signing in with the **same Google account** each
+time (each opens a browser window):
+
+```bash
+gcloud auth login                       # 1. the gcloud CLI itself
+gcloud auth application-default login   # 2. Application Default Credentials (ADC)
+```
+
+-   **#1 `gcloud auth login`** authenticates the gcloud command-line tool.
+-   **#2 ADC** is a *separate* credential that the deploy's REST calls use
+    (Firestore seeding, Storage CORS, IAP setup). It is required even though
+    you ran #1: under corporate Certificate-Based Access (CBA) the plain gcloud
+    token is rejected by those REST endpoints, so the deploy uses ADC instead.
 
 #### Step-by-Step Deployment
 
@@ -248,22 +300,29 @@ All users of the deployed app (including the deployer) require the custom
     `VEO_REGION`           | Region for Veo model invocation.                           | Check availability. Recommended `global`.
     `IMAGE_MODEL`          | Image model for outpainting and image generation.          | `gemini-3-pro-image` (Nano Banana Pro), `gemini-3.1-flash-image` (Nano Banana 2)
     `IMAGE_MODEL_REGION`   | Region for image model invocation.                         | Check availability. Recommended `global`.
-    `API_GATEWAY_REGION`   | Region for API Gateway deployment.                         | Supported: `us-central1`, `europe-west1`, etc.
-    `APP_ENGINE_REGION`    | Region for App Engine application.                         | Supported locations listed in config.
-    `GCS_BUCKET`           | Storage bucket name for storing project images and assets. | Must be globally unique. Auto-generated by default.
+    `GCS_BUCKET`           | Dedicated storage bucket for project images and assets. | Must be globally unique. Auto-created by the deploy. Must not be shared with other data (see Storage note).
     `FIRESTORE_DB`         | Firestore database ID used by the backend modules.         | Defaults to `scene-machine`.
     `FIRESTORE_DB_UI`      | Firestore database ID used by the user interface.          | Defaults to `scene-machine-ui`.
     `ARTIFACT_REPO`        | Artifact Repository ID to store artifacts.                 | Defaults to `scene-machine`.
-    `API_GATEWAY`          | API Gateway ID for the application endpoint.               | Defaults to `scenemachine-api-gateway`.
     `TASKS_QUEUE_PREFIX`   | Prefix for Cloud Task queue names.                         | Max lengths apply. Support letters, hyphen, numbers.
     `BACKEND_SERVICE_NAME` | Service name for the application backend on GCP.           | Defaults to `remix-engine-backend`.
+    `APP_MIN_INSTANCES`    | App service warm instances: 0 = scale to zero (default), 1 = keep one warm. | `0` (cold-start) or `1` (no cold start)
     `CUSTOM_DOMAIN`        | Custom domain for the application user interface.          | Optional. e.g., `scene-machine.my-company.com`
 
     -   **Important Notes for Configuration:**
         -   **Naming:** Use alphanumerical names (with hyphens) for entities
             like databases.
-        -   **Storage:** If using an existing bucket, it must use a
-            non-hierarchical namespace.
+        -   **Storage:** Scene Machine needs a **dedicated** bucket and creates
+            one for you (named `${PROJECT}-scene-machine` by default), labeled
+            `app=scene-machine`. The app issues signed download URLs for every
+            object in `GCS_BUCKET`, so do **not** point it at a shared or
+            pre-existing bucket that holds other data. On redeploy it reuses that
+            bucket and keeps your data in place; a default-named bucket from an
+            earlier release is adopted automatically (it just gains the label).
+            If you set a **custom** `GCS_BUCKET` name that already exists, the
+            deploy refuses it unless you re-run with `ADOPT_EXISTING_BUCKET=1`
+            (only for a bucket you know is dedicated to Scene Machine). A bucket
+            name you supply must use a non-hierarchical namespace.
         -   **Locations:** Match model availability (e.g. Veo might not be
             available in all regions). Check
             [Google Cloud AI Platform documentation](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/learn/locations)
@@ -275,35 +334,52 @@ All users of the deployed app (including the deployer) require the custom
 
 3.  **Execute Deployment**
 
-    The Scene Machine deployment consists of the backend services (databases, Cloud Run, API Gateway, queues) and the frontend UI application (Angular app on App Engine). By default, both components are built and deployed together using a single unified script:
+-   Run the main deployment script. A single image serves both the UI and the
+    `/api` control plane from the `app` Cloud Run service, with a private
+    `worker` service for background jobs — there is no separate UI deployment
+    step:
 
     ```bash
-    ./deploy.sh
+       ./deploy.sh
     ```
 
-    If you want to deploy only one of the components, you can pass the respective targeting flag:
+    -   *Note: The script prints per-phase run times as it goes.*
 
-    *   **Deploy Backend Only:** `./deploy.sh --backend-only`
-    *   **Deploy UI Only:** `./deploy.sh --ui-only`
+    -   **Headless / non-interactive runs:** add `--non-interactive` for
+        automated or agent-driven deploys. It auto-confirms the deploy-target
+        prompt, and instead of waiting at a manual console step, the script
+        fails fast and prints the exact console URL and the command to re-run,
+        so an automation can surface it and continue once the step is done.
 
-> [!TIP]
-> **Troubleshooting Firebase deployment failures:** If `./deploy.sh`
-> fails at the Firebase step with an error like `Error: Project not found`, it
-> usually means the Firebase CLI cannot access the project or terms have not
-> been accepted.
->
-> **How to fix it:**
->
-> 1.  **Check Login:** Ensure you are logged in by running `firebase login` in
->     your terminal.
-> 2.  **Manual Fallback (Accept Terms):** If still failing, go to the
->     [Firebase Console](https://console.firebase.google.com/).
-> 3.  Click **Add Project** and select your existing Google Cloud project from
->     the dropdown list.
-> 4.  Follow the prompts to add Firebase resources. This process will guide you
->     through accepting the necessary terms of service.
-> 5.  Once completed in the console, return to your terminal and re-run
->     `./deploy.sh`.
+    -   **Faster repeat deploys (opt-in):** a plain `./deploy.sh` always does the
+        full, safe deploy. For everyday iteration on an already-set-up project,
+        these flags skip work that is safe to skip, and each one logs what it
+        skipped:
+        -   `--app-only` — build the image and redeploy only the `app` service,
+            reusing the live `worker` (use when you did not change the worker).
+        -   `--skip-ui-build` (alias `--use-existing-ui-dist`) — reuse the
+            already-built `ui/dist` instead of rebuilding the Angular UI (use for
+            backend-only changes). The deploy refuses a `ui/dist` that was built
+            for local dev, so it can never ship a sign-in-disabled build.
+        -   `--no-build-cache` — force a clean image build, ignoring the Docker
+            layer cache (use for a release or a dependency refresh).
+
+        The image build also reuses Docker layers from the previous build
+        automatically, so the slow dependency install only re-runs when
+        `requirements.txt` changes. In practice a cached
+        `--app-only --skip-ui-build` re-deploy is roughly twice as fast as a full
+        one. To develop with **no deploy at all**, use the local loop in
+        [Local Development](DEVELOPING.md).
+
+> [!IMPORTANT]
+> **A first-time deploy on a brand-new project needs a few one-time console
+> actions.** A fresh project needs a handful of one-time steps in the Google
+> Cloud console that have no API to script: configuring the OAuth
+> consent screen, enabling IAP on the `app` service, and — on a project with no
+> organization — creating a custom OAuth client. The deploy itself runs
+> unattended; it prints each remaining step, with the exact console URL, at the
+> end of the run. Once the project has been set up this way, later deploys need
+> no console steps at all.
 
 4.  **Set up OAuth consent screen:**
 
@@ -314,78 +390,25 @@ All users of the deployed app (including the deployer) require the custom
         application you're creating, e.g. Scene Machine.
     -   You can choose **Internal** for the User Type if only users from your
         organization will use the app.
+    -   The OAuth consent screen is a prerequisite for IAP. On a project **with
+        no organization** you will also create a custom OAuth client for IAP in
+        step 6; in an organization, IAP uses Google's managed client and you do
+        not create one.
 
-5.  **Add Firebase Sign-In Provider**
+5.  **Identity-Aware Proxy (IAP)** — this is the only way the app gates access,
+    and the deploy sets most of it up for you:
+    -   `deploy.sh` enables IAP directly on the `app` Cloud Run service (via the
+        `--iap` flag) and grants the IAP service agent the `run.invoker` role.
+        If your `gcloud` is too old to support `--iap`, the script prints the
+        exact `gcloud run services update app --iap ...` command to finish it.
+    -   **On a project with no organization**, also create a custom OAuth client
+        for IAP: Google Cloud console → **Security > Identity-Aware Proxy** →
+        select the `app` service → **Custom OAuth** → *Auto-generate
+        credentials*. Without it, sign-in fails with `502 "Empty OAuth client"`.
+        In an organization this step is not needed (IAP uses the managed client).
+    -   Finally, grant each user access — see [Adding Users](#adding-users).
 
-    -   Go to the [Firebase console](https://console.firebase.google.com/),
-        select your project then click **Authentication > Sign-in method**.
-    -   Click **Add new provider**, choose **Google** then enable and save it.
-
-6.  **Link Storage Bucket to Firebase** — *two sequential actions* are required
-    on the same Firebase Storage page.
-
-    -   Open the [Firebase console](https://console.firebase.google.com/) →
-        select your project → **Databases & Storage** → **Storage**.
-
-    **(a) Initialize Firebase Storage** (one-time per project): - Click **Get
-    started** and walk through the wizard. This creates the project's *default*
-    `<project>.firebasestorage.app` bucket, which the Firebase CLI requires;
-    without it the storage deploy fails with `Firebase Storage has not been set
-    up on project`. - Production mode is fine. - *Note: No-cost locations are
-    only available in the USA.*
-
-    **(b) Register your project bucket with Firebase Storage:** - After (a)
-    finishes the bucket dropdown appears at the top of the page (it doesn't
-    exist until a bucket exists). - Click the dropdown → **+ Add bucket** →
-    **Import existing Google Cloud Storage buckets**. - Select your project
-    bucket (the one referenced by `GCS_BUCKET` in `config.txt`) → confirm.
-
-7.  **Deploy UI**
-
-    -   If you did not deploy both backend and UI together, run:
-        ```bash
-        ./deploy.sh --ui-only
-        ```
-    -   If requested, perform any required manual steps indicated by the script
-        (e.g. linking buckets or configuring OAuth).
-
-> [!TIP]
-> Steps 4–6 can be completed **in parallel** with `./deploy.sh --ui-only`
-> running. The script polls every 15s (or prompts you for the OAuth consent
-> screen) and continues automatically once each manual action is done. After
-> `./deploy.sh` finishes you can launch `./deploy.sh --ui-only` immediately and
-> complete steps 4–6 in browser tabs while it waits.
-
-#### Target Options and Non-Interactive (Agent) Deployment
-
-By default, `./deploy.sh` will deploy both the backend and UI. You can use targeting flags to deploy them individually:
-
-* **Deploy Backend Only**: `./deploy.sh --backend-only`
-* **Deploy UI Only**: `./deploy.sh --ui-only`
-* **Local Development Build**: `./deploy.sh --ui-only --local` (or `./deploy.sh --ui-only local`) to build the Angular application files locally without triggering an App Engine deployment.
-
-To run the script in a non-interactive/headless environment (such as an AI agent like Google Antigravity or Claude), use the `--non-interactive` flag to auto-confirm target configuration prompts:
-
-```bash
-./deploy.sh --non-interactive
-# Or for a targeted headless deployment:
-./deploy.sh --non-interactive --backend-only
-```
-
-> [!IMPORTANT]
-> **First-Time Deployments Cannot be Automated**: An automated/headless deployment cannot be performed on a completely fresh project. The user must complete several manual setup actions on the Google Cloud and Firebase consoles (e.g., configuring the OAuth consent screen, enabling the Google sign-in provider, linking the bucket to Firebase Storage, and enabling IAP). When these checks are hit in headless mode, the script will abort immediately and output the URLs where you need to complete the setup. Once the project is manually initialized, subsequent deployments can be fully automated.
-
-
-8.  **Set up Identity-Aware Proxy**:
-    -   In the
-        [App Engine settings](https://console.cloud.google.com/appengine/settings?serviceId=default),
-        under "Identity-Aware Proxy" select "Configure Now".
-    -   Turn on Identity-Aware Proxy for "App Engine app".
-    -   In the ⋮ menu, select "Settings", then "Custom OAuth", then
-        "Auto-generate credentials".
-        -   *Note: You will not need to download the credentials.*
-
-Once successfully deployed, the script will output the URL where Scene
+Once successfully deployed, `./deploy.sh` will output the URL where Scene
 Machine is available. Note this down to open it in your browser.
 
 To help debug problems with the deployment scripts, you can change their top
@@ -397,9 +420,16 @@ line `set -eu` to `set -eux`, which will output every single command executed.
 [Using Scene Machine >](#using-scene-machine)
 
 Each person intending to use Scene Machine needs to be given the "Scene Machine
-User" role in the Google Cloud project in which the tool is deployed.
-The deployment script's final summary outputs a ready-to-paste `gcloud` command for
-this; you can also run it directly:
+User" role on the deployed project. The recommended way is the bundled helper,
+which checks whether the user already has access and grants it if not (an email
+or a `group:` member both work):
+
+```bash
+./deploy/grant-access.sh "$PROJECT" USER_EMAIL@example.com
+```
+
+`./deploy.sh`'s final summary also prints this command for you. If you prefer to
+grant the role directly:
 
 ```bash
 gcloud projects add-iam-policy-binding $PROJECT \
@@ -461,6 +491,13 @@ To get more information about the inner workings of the tool, refer to the
 
 All saved projects are available to all other users of the same instance of
 Scene Machine.
+
+### Fresh deployments only
+
+This release targets a fresh deployment. It does not migrate existing Firestore
+project documents from an older Scene Machine instance; deploy it into a new
+project (or a project without prior Scene Machine data) rather than expecting it
+to upgrade data in place.
 
 ### Potential data loss
 
