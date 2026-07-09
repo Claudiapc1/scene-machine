@@ -1,0 +1,65 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Loads the checked-in model allowlist (`ui/definitions/models.json`).
+
+One shared loader so every reader parses the file the same way.
+"""
+
+import copy
+import functools
+import json
+import os
+
+_ALLOWLIST_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    'ui', 'definitions', 'models.json',
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _parse_allowlist(path: str) -> dict:
+  with open(path, encoding='utf-8') as f:
+    return json.load(f)
+
+
+def load_allowlist(path: str = _ALLOWLIST_PATH) -> dict:
+  """Loads and returns the allowlist ({'actions': {...}, 'models': {...}}).
+
+  Parsed once and cached, like actions.json. Callers get a deep copy so this
+  security data can't be mutated process-wide by a stray writer. A
+  missing/unparseable file raises here (startup failure), never per-request.
+  """
+  return copy.deepcopy(_parse_allowlist(path))
+
+
+def models_for_action(action: str, allowlist: dict | None = None) -> list[str]:
+  """Returns the model IDs allowed for `action`."""
+  allowlist = allowlist or load_allowlist()
+  return [model_id for model_id, entry in allowlist['models'].items()
+          if action in entry.get('actions', [])]
+
+
+def is_pair_allowed(action: str, model: str, location: str | None,
+                    allowlist: dict | None = None) -> bool:
+  """True if `model` is allowed for `action` and (when the action has a
+  location param) `location` is in the model's allowed locations."""
+  allowlist = allowlist or load_allowlist()
+  entry = allowlist['models'].get(model)
+  if entry is None or action not in entry.get('actions', []):
+    return False
+  action_spec = allowlist['actions'].get(action, {})
+  if action_spec.get('location_param') is None:
+    return True  # no location param on this action -> location not validated
+  return location in entry.get('locations', [])

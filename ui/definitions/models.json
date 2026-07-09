@@ -1,0 +1,109 @@
+{
+  "defaults": {
+    "gemini": "gemini-3.5-flash",
+    "image": "gemini-3-pro-image",
+    "veo": "veo-3.1-generate-001"
+  },
+  "actions": {
+    "translate":             { "location_param": "gemini_model_location", "default_key": "geminiModel" },
+    "describe_image":        { "location_param": null,                    "default_key": "geminiModel" },
+    "write_products_script": { "location_param": "gemini_model_location", "default_key": "geminiModel" },
+    "analyse_file":          { "location_param": null,                    "default_key": "geminiModel" },
+    "generate_storyboard":   { "location_param": "gemini_model_location", "default_key": "geminiModel" },
+    "outpaint_image":        { "location_param": "image_model_location",  "default_key": "imageModel" },
+    "generate_image":        { "location_param": "image_model_location",  "default_key": "imageModel" },
+    "generate_video":        { "location_param": "gcp_location",          "default_key": "veoModel" }
+  },
+  "models": {
+    "gemini-3.5-flash": {
+      "family": "gemini",
+      "actions": ["translate", "describe_image", "write_products_script", "analyse_file", "generate_storyboard"],
+      "locations": ["global"],
+      "capabilities": {}
+    },
+    "gemini-3.1-pro-preview": {
+      "family": "gemini",
+      "actions": ["translate", "describe_image", "write_products_script", "analyse_file", "generate_storyboard"],
+      "locations": ["global"],
+      "capabilities": {}
+    },
+    "gemini-3.1-flash-lite": {
+      "family": "gemini",
+      "actions": ["translate", "describe_image", "write_products_script", "analyse_file", "generate_storyboard"],
+      "locations": ["global"],
+      "capabilities": {}
+    },
+    "veo-3.1-generate-001": {
+      "family": "veo",
+      "actions": ["generate_video"],
+      "locations": ["global", "us-central1"],
+      "capabilities": {
+        "supports_audio": true,
+        "enhance_prompt_locked": true,
+        "max_videos_per_request": 4,
+        "allowed_aspect_ratios": ["16:9", "9:16"],
+        "allowed_resolutions": ["720p", "1080p", "4k"],
+        "duration_by_resolution": {"720p": [4, 6, 8], "1080p": [4, 6, 8], "4k": [8]},
+        "supports_last_frame": true,
+        "supports_reference_images": true
+      }
+    },
+    "veo-3.1-fast-generate-001": {
+      "family": "veo",
+      "actions": ["generate_video"],
+      "locations": ["global", "us-central1"],
+      "capabilities": {
+        "supports_audio": true,
+        "enhance_prompt_locked": true,
+        "max_videos_per_request": 4,
+        "allowed_aspect_ratios": ["16:9", "9:16"],
+        "allowed_resolutions": ["720p", "1080p", "4k"],
+        "duration_by_resolution": {"720p": [4, 6, 8], "1080p": [4, 6, 8], "4k": [8]},
+        "supports_last_frame": true,
+        "supports_reference_images": true
+      }
+    },
+    "veo-3.1-lite-generate-001": {
+      "family": "veo",
+      "actions": ["generate_video"],
+      "locations": ["global", "us-central1"],
+      "capabilities": {
+        "supports_audio": true,
+        "enhance_prompt_locked": true,
+        "max_videos_per_request": 4,
+        "allowed_aspect_ratios": ["16:9", "9:16"],
+        "allowed_resolutions": ["720p", "1080p"],
+        "duration_by_resolution": {"720p": [4, 6, 8], "1080p": [4, 6, 8]},
+        "supports_last_frame": true,
+        "supports_reference_images": false
+      }
+    },
+    "gemini-3-pro-image": {
+      "family": "image",
+      "actions": ["generate_image", "outpaint_image"],
+      "locations": ["global"],
+      "capabilities": {
+        "image_sizes": ["1K", "2K", "4K"],
+        "supports_video_input": false
+      }
+    },
+    "gemini-3.1-flash-image": {
+      "family": "image",
+      "actions": ["generate_image", "outpaint_image"],
+      "locations": ["global"],
+      "capabilities": {
+        "image_sizes": ["0.5K", "1K", "2K", "4K"],
+        "supports_video_input": true
+      }
+    },
+    "gemini-3.1-flash-lite-image": {
+      "family": "image",
+      "actions": ["generate_image"],
+      "locations": ["global"],
+      "capabilities": {
+        "image_sizes": ["1K"],
+        "supports_video_input": true
+      }
+    }
+  }
+}

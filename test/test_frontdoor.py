@@ -123,7 +123,7 @@ def _capture_supply_node(monkeypatch, orch, execution_id='exec-test'):
 
 
 # ---------------------------------------------------------------------------
-# (f) ROLE unset (default 'all'): exactly today's three root routes, no
+# (a) ROLE unset (default 'all'): exactly today's three root routes, no
 # auth, Host-derived callback — byte-identical legacy behavior.
 # ---------------------------------------------------------------------------
 def test_default_role_all_routes_and_no_auth(monkeypatch, orchestrator_module):
@@ -169,7 +169,7 @@ def test_supply_node_rejects_non_object_workflow_params(
 
 
 # ---------------------------------------------------------------------------
-# (a) ROLE=worker: /supplyNode + /triggerAction only; no /api/*, no
+# (b) ROLE=worker: /supplyNode + /triggerAction only; no /api/*, no
 # /getStatus, no static serving.
 # ---------------------------------------------------------------------------
 def test_worker_exposes_only_task_routes(monkeypatch, orchestrator_module):
@@ -189,7 +189,7 @@ def test_worker_exposes_only_task_routes(monkeypatch, orchestrator_module):
 
 
 # ---------------------------------------------------------------------------
-# (b) ROLE=app: /api/supplyNode + /api/getStatus; the bare worker routes
+# (c) ROLE=app: /api/supplyNode + /api/getStatus; the bare worker routes
 # are not registered.
 # ---------------------------------------------------------------------------
 def test_app_exposes_api_routes_not_worker_routes(
@@ -222,7 +222,7 @@ def test_app_exposes_api_routes_not_worker_routes(
 
 
 # ---------------------------------------------------------------------------
-# (c) WORKER_URL overrides the Host-derived Cloud Tasks callback base in
+# (d) WORKER_URL overrides the Host-derived Cloud Tasks callback base in
 # both task-creating handlers.
 # ---------------------------------------------------------------------------
 def test_worker_url_overrides_host_for_supply_node(
@@ -403,7 +403,7 @@ def _accept_iap(monkeypatch, orch, email='user@example.com'):
 
 
 # ---------------------------------------------------------------------------
-# (d) AUTH_MODE=iap on ROLE=app: /api/* requires a valid IAP JWT assertion;
+# (e) AUTH_MODE=iap on ROLE=app: /api/* requires a valid IAP JWT assertion;
 # static paths stay open.
 # ---------------------------------------------------------------------------
 def test_iap_auth_gates_api_routes(monkeypatch, orchestrator_module):
@@ -477,7 +477,7 @@ def test_iap_auth_gates_api_routes(monkeypatch, orchestrator_module):
 
 
 # ---------------------------------------------------------------------------
-# (e) AUTH_MODE=iap on ROLE=app: the IAP JWT assertion is verified against the
+# (f) AUTH_MODE=iap on ROLE=app: the IAP JWT assertion is verified against the
 # configured audience and certs URL; the Firebase custom-token bridge no longer
 # exists (the client signs in via IAP directly, not Firebase Auth).
 # ---------------------------------------------------------------------------
@@ -583,3 +583,78 @@ def test_app_serves_definitions_and_status_viewer(
   assert response.status_code == 200
   assert b'<' in response.data  # serves status.html for the bare /status
   assert client.get('/status/re.css').status_code == 200
+
+
+# Helpers for the ROLE=app submission-validation tests below.
+def _video_node(model, location):
+  return {
+      'nodeId': 'n',
+      'workflowDefinition': {
+          'n': {
+              'action': 'generate_video',
+              'parameters': {'model': model, 'gcp_location': location},
+          }
+      },
+  }
+
+
+def _app_submit(monkeypatch, orch, body):
+  captured = _capture_supply_node(monkeypatch, orch)
+  response = orch.app.test_client().post('/api/supplyNode', json=body)
+  return response, captured
+
+
+# ---------------------------------------------------------------------------
+# (g) ROLE=app validates the submission against the model allowlist before
+# anything is stored or a task runs. The worker route is exempt by role.
+# ---------------------------------------------------------------------------
+def test_app_rejects_rogue_model(monkeypatch, orchestrator_module):
+  del orchestrator_module
+  orch = _load_orch(monkeypatch, ROLE='app', WORKER_URL='https://w.a.run.app')
+  response, captured = _app_submit(
+      monkeypatch, orch, _video_node('rogue', 'global'))
+  assert response.status_code == 400
+  assert response.get_json()['code'] == 'MODEL_NOT_ALLOWED'
+  assert captured == {}  # nothing stored, no task scheduled
+
+
+def test_app_rejects_disallowed_location(monkeypatch, orchestrator_module):
+  del orchestrator_module
+  orch = _load_orch(monkeypatch, ROLE='app', WORKER_URL='https://w.a.run.app')
+  response, captured = _app_submit(
+      monkeypatch, orch, _video_node('veo-3.1-generate-001', 'europe-west4'))
+  assert response.status_code == 400
+  assert response.get_json()['code'] == 'MODEL_LOCATION_PAIR_INVALID'
+  assert captured == {}
+
+
+def test_app_rejects_client_execution_id(monkeypatch, orchestrator_module):
+  del orchestrator_module
+  orch = _load_orch(monkeypatch, ROLE='app', WORKER_URL='https://w.a.run.app')
+  body = _video_node('veo-3.1-generate-001', 'global')
+  body['executionId'] = 'exec-injected'
+  response, captured = _app_submit(monkeypatch, orch, body)
+  assert response.status_code == 400
+  assert response.get_json()['code'] == 'EXECUTION_ID_NOT_ALLOWED'
+  assert captured == {}
+
+
+def test_app_accepts_valid_submission(monkeypatch, orchestrator_module):
+  del orchestrator_module
+  orch = _load_orch(monkeypatch, ROLE='app', WORKER_URL='https://w.a.run.app')
+  response, captured = _app_submit(
+      monkeypatch, orch, _video_node('veo-3.1-generate-001', 'global'))
+  assert response.status_code == 200
+  assert 'data' in captured  # the node reached orchestrator.supply_node
+
+
+def test_worker_route_does_not_validate(monkeypatch, orchestrator_module):
+  # Leak detector: a rogue model on the worker route is NOT rejected --
+  # validation runs only on the app role.
+  del orchestrator_module
+  orch = _load_orch(monkeypatch, ROLE='worker', WORKER_URL='https://w.a.run.app')
+  captured = _capture_supply_node(monkeypatch, orch)
+  response = orch.app.test_client().post(
+      '/supplyNode', json=_video_node('rogue', 'global'))
+  assert response.status_code == 200
+  assert 'data' in captured
