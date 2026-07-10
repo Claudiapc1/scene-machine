@@ -215,6 +215,7 @@ require_tool node     "Install Node.js ≥ v22: https://nodejs.org/en/download"
 require_tool npm      "Install Node.js (includes npm): https://nodejs.org/en/download"
 require_tool envsubst "Install gettext (macOS: 'brew install gettext'; Debian/Ubuntu: 'apt-get install gettext')"
 require_tool curl     "Install curl (it ships with macOS and most Linux distributions)"
+require_tool python3  "Install Python 3 (macOS: 'brew install python' or the Xcode CLT; Debian/Ubuntu: 'apt-get install python3')"
 if [ $MISSING_TOOLS -gt 0 ]; then
   echo "Please install the missing tools above, then re-run $0."
   exit 1
@@ -272,7 +273,25 @@ if [ $MISSING -gt 0 ]; then
   echo "Validation failed. Please fix config.txt and try again." >&2
   exit 1
 fi
+# Export sourced config vars so Python checks and envsubst see bare VAR= lines.
+set -a
 source ./config.txt
+set +a
+# The grep above accepts a value like VAR=$OTHER (the $ is a valid char), but if
+# $OTHER is unset it expands to empty here -- which would slip past the model
+# check below (an empty model is skipped as "not configured"). Require every
+# required var to be non-empty after expansion.
+EMPTY_AFTER_SOURCE=0
+for var in "${REQUIRED_VARS[@]}"; do
+  if [ -z "${!var}" ]; then
+    echo "ERROR: $var is empty after expanding config.txt" >&2
+    EMPTY_AFTER_SOURCE=$((EMPTY_AFTER_SOURCE + 1))
+  fi
+done
+if [ $EMPTY_AFTER_SOURCE -gt 0 ]; then
+  echo "Validation failed. Please fix config.txt and try again." >&2
+  exit 1
+fi
 # Single image name for both Cloud Run services (overridable via env).
 IMAGE_NAME="${IMAGE_NAME:-scene-machine}"
 # App service minimum instances: 0 (default) scales to zero; 1 keeps one
@@ -290,6 +309,15 @@ fi
 # surface at all. This is always the case — there is no data-plane mode to
 # choose.
 echo "✓ config.txt is valid. Target project: $PROJECT"
+
+# --- Check configured models against the allowlist --------------------------
+# A model/region typo, or a model/region not in ui/definitions/models.json,
+# should fail here at deploy time -- not later at runtime against Vertex.
+echo "[>] Checking configured models against the allowlist..."
+if ! python3 scripts/validate_config_models.py; then
+  echo "Validation failed. Fix config.txt, or add the model/region to ui/definitions/models.json." >&2
+  exit 1
+fi
 
 # --- Confirm deployment target ----------------------------------------------
 # Final pre-flight gate. Shows gcloud's current state alongside config.txt's
