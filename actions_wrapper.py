@@ -251,7 +251,12 @@ def wrapper(func: ActionFunction) -> Callable[..., NodeOutput]:
     final_output = util_dimensions.rename_dimensions(
         final_output, dimensions_mapping
     )
-    _update(file, final_output)
+    try:
+      _update(file, final_output)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      raise util_errors.TaskCompletionWriteError(
+          'Failed to store action output cache; refusing automatic action retry'
+      ) from e
     print(f'Wrote file {filepath}')
     return final_output
 

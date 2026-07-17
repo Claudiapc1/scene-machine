@@ -16,6 +16,7 @@
 
 import copy
 import datetime
+import hashlib
 import json
 import logging
 import os
@@ -28,6 +29,7 @@ import uuid
 import actions_wrapper as actwrap
 from common import ContentType
 from common import Key
+from google.api_core import exceptions as google_exceptions
 import google.auth.transport.requests
 from google.cloud import tasks_v2
 import google.cloud.logging
@@ -35,6 +37,7 @@ import google.oauth2.id_token
 import requests
 from util import database
 from util import dimensions as util_dimensions
+from util import errors as util_errors
 from util import gcs_wrapper
 from util import group_input
 from util import workflow as util_workflow
@@ -46,7 +49,9 @@ ENDPOINT_SUPPLY_NODE = 'supplyNode'
 ENDPOINT_TRIGGER_ACTION = 'triggerAction'
 
 _TASKS_QUEUE_CLASS_DEFAULT = 'Other'
+_TASK_DISPATCH_DEADLINE_SECONDS = 1800
 _GCS_HOST = 'https://storage.mtls.cloud.google.com/'
+_TASK_COMPLETION_PREFIX = '_task-completions'
 
 
 if os.environ.get('K_SERVICE'):
@@ -209,7 +214,7 @@ def supply_node(
                     service_account_email=service_account_email
                 ),
             ),
-            dispatch_deadline={'seconds': 1800},
+            dispatch_deadline={'seconds': _TASK_DISPATCH_DEADLINE_SECONDS},
         )
         client.create_task(parent=queue_path, task=task)
       else:
@@ -268,7 +273,7 @@ def _inform_successors(
                   service_account_email=service_account_email
               ),
           ),
-          dispatch_deadline={'seconds': 1800},
+          dispatch_deadline={'seconds': _TASK_DISPATCH_DEADLINE_SECONDS},
       )
       client.create_task(parent=queue_path, task=task)
     else:
@@ -276,10 +281,100 @@ def _inform_successors(
       thread.start()
 
 
+def _local_task_token(data: dict[str, Any]) -> str:
+  """Builds a stable task identity for the in-process development path."""
+  return hashlib.sha256(
+      json.dumps(
+          [
+              'local',
+              data[Key.EXECUTION_ID.value],
+              data[Key.NODE_ID.value],
+              str(data[Key.GROUP_ID.value]),
+          ],
+          ensure_ascii=True,
+          separators=(',', ':'),
+      ).encode('utf-8')
+  ).hexdigest()
+
+
+def _task_completion_blob(data: dict[str, Any], task_token: str):
+  bucket_name = data[Key.WORKFLOW_PARAMS.value][Key.GCS_BUCKET.value]
+  gcs = gcs_wrapper.GCS(
+      _TASK_COMPLETION_PREFIX,
+      task_token,
+      bucket_name,
+  )
+  return gcs.gcs_bucket.blob(f'{_TASK_COMPLETION_PREFIX}/{task_token}.json')
+
+
+def _load_task_completion(
+    data: dict[str, Any], task_token: str, recovery_only: bool = False
+) -> dict[str, Any] | None:
+  """Loads a task-specific output without falling back to execution."""
+  blob = _task_completion_blob(data, task_token)
+  try:
+    manifest = blob.download_as_bytes()
+  except google_exceptions.NotFound:
+    if recovery_only:
+      raise util_errors.RetryableTaskRecoveryError(
+          'Required task completion output is missing'
+      )
+    return None
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    retryable_error = (
+        util_errors.RetryableTaskRecoveryError
+        if recovery_only
+        else util_errors.RetryablePreActionProbeError
+    )
+    raise retryable_error('Failed to read task completion output') from e
+  try:
+    output = json.loads(manifest)
+    if not isinstance(output, dict):
+      raise TypeError('Task completion output must be a JSON object')
+    return output
+  # Known content failures repeat for the same object. Unexpected local parser
+  # failures may be transient, so only the known failures are terminal.
+  except (ValueError, TypeError, RecursionError) as e:
+    logger.error(
+        'Invalid task completion output at gs://%s/%s/%s.json: %s',
+        data[Key.WORKFLOW_PARAMS.value][Key.GCS_BUCKET.value],
+        _TASK_COMPLETION_PREFIX,
+        task_token,
+        e,
+    )
+    raise
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    raise util_errors.RetryableTaskRecoveryError(
+        'Failed to read task completion output'
+    ) from e
+
+
+def _store_task_completion(
+    data: dict[str, Any], task_token: str, output: dict[str, Any]
+) -> dict[str, Any]:
+  """Creates the task-specific output used by later task deliveries."""
+  blob = _task_completion_blob(data, task_token)
+  try:
+    blob.upload_from_string(
+        json.dumps(output),
+        content_type=ContentType.JSON.value,
+        if_generation_match=0,
+    )
+    return output
+  except google_exceptions.PreconditionFailed:
+    return _load_task_completion(data, task_token, recovery_only=True)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    raise util_errors.TaskCompletionWriteError(
+        'Failed to prove task completion; refusing automatic action retry'
+    ) from e
+
+
 def trigger_action(
     data: dict[str, Any],
     instance: str | None = None,
     can_still_retry: bool = False,
+    task_token: str | None = None,
+    recovery_only: bool = False,
 ) -> None:
   """Triggers an action's execution.
 
@@ -287,6 +382,8 @@ def trigger_action(
     data: The workfload description.
     instance: The address of the Cloud Run instance to use.
     can_still_retry: Flag specifying whether failure would be final.
+    task_token: Stable identity shared by deliveries of one Cloud Task.
+    recovery_only: Whether executing the action is forbidden for this delivery.
   """
   action = data[Key.ACTION.value]
   node_id = data[Key.NODE_ID.value]
@@ -305,19 +402,30 @@ def trigger_action(
     func = actwrap.wrapper(actwrap.get_action_by_name(action))
   else:  # For pass action, simply forward
     func = lambda input_files, *_: input_files
-  output = func(
-      data[Key.INPUT_FILES.value],
-      data.get(Key.PARAMETERS.value, {}),
-      data[Key.WORKFLOW_PARAMS.value],
-      node.get(Key.DIMENSIONS_CONSUMED.value, []),
-      node.get(Key.DIMENSIONS_MAPPING.value, {}),
-      data[Key.FORCE_EXECUTION.value],
-      can_still_retry,
-  )
+  task_token = task_token or _local_task_token(data)
+  output = _load_task_completion(data, task_token, recovery_only)
+  if output is None:
+    output = func(
+        data[Key.INPUT_FILES.value],
+        data.get(Key.PARAMETERS.value, {}),
+        data[Key.WORKFLOW_PARAMS.value],
+        node.get(Key.DIMENSIONS_CONSUMED.value, []),
+        node.get(Key.DIMENSIONS_MAPPING.value, {}),
+        data[Key.FORCE_EXECUTION.value],
+        can_still_retry,
+    )
+    output = _store_task_completion(data, task_token, output)
 
-  db.store_output(execution_id, node_id, group_id, output)
-  logger.info((execution_id, 'PERFORMED', node, action, output))
-  _inform_successors(instance, data, output)
+  try:
+    db.store_output(execution_id, node_id, group_id, output)
+    logger.info((execution_id, 'PERFORMED', node, action, output))
+    _inform_successors(instance, data, output)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    if util_errors.is_transient_infrastructure_error(e):
+      raise util_errors.RetryablePostActionError(
+          'Transient infrastructure failure after action completion'
+      ) from e
+    raise
 
 
 def get_status(

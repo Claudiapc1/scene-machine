@@ -40,14 +40,15 @@ import copy
 import importlib
 import json
 import pathlib
-import threading
 import time
 from typing import Any
 from unittest import mock
 
+from google.api_core import exceptions as google_exceptions
 import pytest
 
 from test import firestore_fake
+from util import errors as util_errors
 
 _REPO = pathlib.Path(__file__).resolve().parent.parent
 _CONFIG_PATH = _REPO / 'ui' / 'definitions' / 'config.json'
@@ -62,8 +63,6 @@ _WORKFLOW_PARAMS = {
 # Generous deadline for thread-driven flows; tests poll and fail fast on
 # success, so the full deadline is only ever consumed by a real regression.
 _DEADLINE_SECONDS = 15.0
-# Deadline used when asserting that something does NOT happen.
-_QUIET_SECONDS = 1.5
 
 
 def _wait_for(predicate, timeout=_DEADLINE_SECONDS, interval=0.02):
@@ -77,27 +76,56 @@ def _wait_for(predicate, timeout=_DEADLINE_SECONDS, interval=0.02):
 
 
 class _FakeBlob:
-  """Cache blob that never exists and swallows writes."""
+  """In-memory blob with create-only and generation-match behavior."""
 
-  def __init__(self):
+  def __init__(self, path, objects, generations):
+    self.path = path
+    self.objects = objects
+    self.generations = generations
     self.metadata = None
+    self.generation = None
 
   def exists(self):
-    return False
+    return self.path in self.objects
 
-  def upload_from_string(self, *_args, **_kwargs):
-    pass
+  def reload(self):
+    if self.path not in self.objects:
+      raise google_exceptions.NotFound('object not found')
+    self.generation = self.generations[self.path]
 
-  def download_as_string(self):
-    raise AssertionError('cache read attempted on a non-existent fake blob')
+  def upload_from_string(self, data, if_generation_match=None, **_kwargs):
+    if if_generation_match == 0 and self.path in self.objects:
+      raise google_exceptions.PreconditionFailed('object already exists')
+    self.objects[self.path] = data
+    self.generations[self.path] = self.generations.get(self.path, 0) + 1
+    self.generation = self.generations[self.path]
+
+  def download_as_string(self, if_generation_match=None):
+    if self.path not in self.objects:
+      raise google_exceptions.NotFound('object not found')
+    if (
+        if_generation_match is not None
+        and if_generation_match != self.generations[self.path]
+    ):
+      raise google_exceptions.PreconditionFailed('generation changed')
+    return self.objects[self.path]
+
+  def download_as_bytes(self):
+    data = self.download_as_string()
+    return data.encode('utf-8') if isinstance(data, str) else data
 
 
 class _FakeGCS:
   """Stand-in for util.gcs_wrapper.GCS in the action wrapper."""
 
+  objects = {}
+  generations = {}
+
   def __init__(self, *_args, **_kwargs):
     self.gcs_bucket = mock.Mock()
-    self.gcs_bucket.blob = lambda _path: _FakeBlob()
+    self.gcs_bucket.blob = lambda path: _FakeBlob(
+        path, self.objects, self.generations
+    )
 
 
 @pytest.fixture(scope='module')
@@ -149,6 +177,8 @@ def engine(orch, monkeypatch):
   actions_wrapper_module = importlib.import_module('actions_wrapper')
 
   fresh_db = database_module.Database('characterization-test')
+  _FakeGCS.objects = {}
+  _FakeGCS.generations = {}
   monkeypatch.setattr(orch, 'db', fresh_db)
   monkeypatch.setattr(gcs_wrapper_module, 'GCS', _FakeGCS)
 
@@ -413,55 +443,34 @@ def test_join_seal_rejects_late_arrivals(engine):
   assert files == {}
 
 
-# ---------------------------------------------------------------------------
-# CHARACTERIZATION: join-token loss (findings §1.5, manifest ORC-11) — when a
-# failure escapes the action wrapper's containment (here: db.store_output
-# raising), the group's join token is silently dropped and the downstream
-# node waits forever. There is no watchdog. This pins the CURRENT behavior;
-# the intended fix (containment around the orchestration layer) is a
-# deliberate, separately-reviewed change.
-# ---------------------------------------------------------------------------
-@pytest.mark.filterwarnings(
-    'ignore::pytest.PytestUnhandledThreadExceptionWarning'
-)
-def test_token_loss_on_store_output_failure_stalls_downstream(
+def test_store_output_deadline_is_marked_after_action_completion(
     engine, monkeypatch
 ):
-  # The injected store_output failure escapes inside a worker thread by
-  # design (that escape IS the behavior under test), so the unhandled-
-  # thread-exception warning is expected here and suppressed.
-  storyboard_calls = []
-  _register_outpaint(engine)
-  _register_storyboard(engine, storyboard_calls)
+  action_calls = []
+  _register_outpaint(engine, calls=action_calls)
 
-  real_store_output = engine.db.store_output
-  failed = threading.Event()
+  def unavailable(*_args, **_kwargs):
+    raise google_exceptions.DeadlineExceeded('Firestore deadline exceeded')
 
-  def flaky_store_output(execution_id, node_id, group_id, output):
-    if node_id == 'n_outpaint' and str(group_id) == '0' and not failed.is_set():
-      failed.set()
-      raise RuntimeError('simulated Firestore outage')
-    return real_store_output(execution_id, node_id, group_id, output)
+  monkeypatch.setattr(engine.db, 'store_output', unavailable)
+  data = {
+      'action': 'outpaint_image',
+      'executionId': 'store-output-retry',
+      'nodeId': 'n_outpaint',
+      'groupId': 0,
+      'inputFiles': {'image': _images(1)},
+      'parameters': {},
+      'workflowDefinition': _outpaint_dag(),
+      'workflowParams': dict(_WORKFLOW_PARAMS),
+      'forceExecution': True,
+      'siblingActions': 1,
+  }
 
-  monkeypatch.setattr(engine.db, 'store_output', flaky_store_output)
+  with pytest.raises(util_errors.RetryablePostActionError) as raised:
+    engine.orchestrator.trigger_action(data)
 
-  execution_id = engine.run(
-      _payload(
-          _storyboard_dag(),
-          {
-              'images': _images(2),
-              'user_prompt': [{'file': 'uploads/brief.txt'}],
-          },
-      )
-  )
-
-  assert _wait_for(failed.is_set)
-  # The successor never fires and the sink never produces output: the
-  # workflow is permanently stalled (current behavior — no watchdog).
-  assert not _wait_for(
-      lambda: storyboard_calls or engine.sink_output(execution_id),
-      timeout=_QUIET_SECONDS,
-  )
+  assert isinstance(raised.value.__cause__, google_exceptions.DeadlineExceeded)
+  assert len(action_calls) == 1
 
 
 # ---------------------------------------------------------------------------
