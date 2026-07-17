@@ -15,12 +15,16 @@
 """Converts a video from one format to another."""
 
 from __future__ import annotations
+
+import tempfile
+
 from actions_lib.ffmpeg import FFMPEG
 from common import ContentType
 from common import Key
 from common import NodeInput
 from common import NodeOutput
 from common import Params
+from util.gcs_wrapper import download_distinct_inputs
 from util.gcs_wrapper import GCS
 
 
@@ -43,19 +47,20 @@ def execute(
     A NodeOutput object containing the path to the converted video file.
   """
   file_path = file[0][Key.FILE.value]
-  local_path = file_path.split("/")[-1]
-  gcs.save_locally(file_path, local_path)
+  with tempfile.TemporaryDirectory() as workdir:
+    local_paths = download_distinct_inputs(gcs, [file_path], workdir)
+    local_path = local_paths[file_path]
 
-  ffmpeg = FFMPEG().set_resolution(output_file_dimension)
-  converted_video_path = ffmpeg.convert_video(local_path, output_file_extension)
+    ffmpeg = FFMPEG().set_resolution(output_file_dimension)
+    converted_video_path = ffmpeg.convert_video(
+        local_path, output_file_extension
+    )
 
-  with open(converted_video_path, "rb") as output_file:
-    output_file_bites = output_file.read()
     return {
-        "video": [{
-            Key.FILE.value: gcs.store(
-                output_file_bites,
-                f"output.{output_file_extension}",
+        'video': [{
+            Key.FILE.value: gcs.store_file(
+                converted_video_path,
+                f'output.{output_file_extension}',
                 ContentType.MP4.value,
             )
         }]
